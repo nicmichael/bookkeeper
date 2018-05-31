@@ -129,7 +129,8 @@ public class RegionAwareEnsemblePlacementPolicy extends RackawareEnsemblePlaceme
             String region = getLocalRegion(node);
             if (null == perRegionPlacement.get(region)) {
                 perRegionPlacement.put(region, new RackawareEnsemblePlacementPolicy()
-                        .initialize(dnsResolver, timer, this.reorderReadsRandom, this.stabilizePeriodSeconds,
+                        .initialize(dnsResolver, timer, this.reorderReadsRandom,
+                                this.stabilizePeriodSeconds, this.reorderThresholdPendingRequests,
                                 this.isWeighted, this.maxWeightMultiple, statsLogger)
                         .withDefaultRack(NetworkTopology.DEFAULT_REGION_AND_RACK));
             }
@@ -177,7 +178,8 @@ public class RegionAwareEnsemblePlacementPolicy extends RackawareEnsemblePlaceme
             String[] regions = regionsString.split(";");
             for (String region: regions) {
                 perRegionPlacement.put(region, new RackawareEnsemblePlacementPolicy(true)
-                        .initialize(dnsResolver, timer, this.reorderReadsRandom, this.stabilizePeriodSeconds,
+                        .initialize(dnsResolver, timer, this.reorderReadsRandom,
+                                this.stabilizePeriodSeconds, this.reorderThresholdPendingRequests,
                                 this.isWeighted, this.maxWeightMultiple, statsLogger)
                         .withDefaultRack(NetworkTopology.DEFAULT_REGION_AND_RACK));
             }

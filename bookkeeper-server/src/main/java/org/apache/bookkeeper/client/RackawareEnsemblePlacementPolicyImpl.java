@@ -197,6 +197,7 @@ public class RackawareEnsemblePlacementPolicyImpl extends TopologyAwareEnsembleP
     protected boolean reorderReadsRandom = false;
     protected boolean enforceDurability = false;
     protected int stabilizePeriodSeconds = 0;
+    protected int reorderThresholdPendingRequests = 0;
     // looks like these only assigned in the same thread as constructor, immediately after constructor;
     // no need to make volatile
     protected StatsLogger statsLogger = null;
@@ -231,6 +232,7 @@ public class RackawareEnsemblePlacementPolicyImpl extends TopologyAwareEnsembleP
                                                               HashedWheelTimer timer,
                                                               boolean reorderReadsRandom,
                                                               int stabilizePeriodSeconds,
+                                                              int reorderThresholdPendingRequests,
                                                               boolean isWeighted,
                                                               int maxWeightMultiple,
                                                               StatsLogger statsLogger) {
@@ -240,6 +242,7 @@ public class RackawareEnsemblePlacementPolicyImpl extends TopologyAwareEnsembleP
         this.bookiesLeftCounter = statsLogger.getOpStatsLogger(BookKeeperServerStats.BOOKIES_LEFT);
         this.reorderReadsRandom = reorderReadsRandom;
         this.stabilizePeriodSeconds = stabilizePeriodSeconds;
+        this.reorderThresholdPendingRequests = reorderThresholdPendingRequests;
         this.dnsResolver = new DNSResolverDecorator(dnsResolver, () -> this.getDefaultRack());
         this.timer = timer;
 
@@ -327,6 +330,7 @@ public class RackawareEnsemblePlacementPolicyImpl extends TopologyAwareEnsembleP
                 timer,
                 conf.getBoolean(REPP_RANDOM_READ_REORDERING, false),
                 conf.getNetworkTopologyStabilizePeriodSeconds(),
+                conf.getReorderThresholdPendingRequests(),
                 conf.getDiskWeightBasedPlacementEnabled(),
                 conf.getBookieMaxWeightMultipleForWeightBasedPlacement(),
                 statsLogger);
@@ -951,6 +955,10 @@ public class RackawareEnsemblePlacementPolicyImpl extends TopologyAwareEnsembleP
         // to avoid creating more lists
         boolean isAnyBookieUnavailable = false;
 
+        // number of outstanding requests per bookie (same index as ensemble)
+        long[] pendingReqs = new long[ensemble.size()];
+        int bestBookieIdx = -1;
+
         if (useRegionAware || reorderReadsRandom) {
             isAnyBookieUnavailable = true;
         } else {
@@ -961,11 +969,31 @@ public class RackawareEnsemblePlacementPolicyImpl extends TopologyAwareEnsembleP
                     // Found at least one bookie not available in the ensemble, or in slowBookies
                     isAnyBookieUnavailable = true;
                     break;
+                } else {
+                    // in absence of slow bookies, capture each bookie's number of pending request
+                    if (reorderThresholdPendingRequests > 0) {
+                        pendingReqs[i] = bookiesHealthInfo.getBookiePendingRequests(bookieAddr);
+                        if (bestBookieIdx < 0 || pendingReqs[i] < pendingReqs[bestBookieIdx]) {
+                            bestBookieIdx = i;
+                        }
+                    }
                 }
             }
         }
 
         if (!isAnyBookieUnavailable) {
+            if (reorderThresholdPendingRequests > 0 && writeSet.get(0) != bestBookieIdx
+                    && pendingReqs[writeSet.get(0)] >= pendingReqs[bestBookieIdx] + reorderThresholdPendingRequests) {
+                for (int i = 1; i < writeSet.size(); i++) {
+                    if (writeSet.get(i) == bestBookieIdx) {
+                        LOG.info("NICK read set reordered from %s (%d pending) to %s (%d pending)",
+                                ensemble.get(writeSet.get(0)), pendingReqs[writeSet.get(0)],
+                                ensemble.get(bestBookieIdx), pendingReqs[bestBookieIdx]);
+                        writeSet.moveAndShift(i, 0);
+                        break;
+                    }
+                }
+            }
             return writeSet;
         }
 

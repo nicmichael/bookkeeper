@@ -151,6 +151,7 @@ public class ClientConfiguration extends AbstractConfiguration<ClientConfigurati
     // Ensemble Placement Policy
     protected static final String ENSEMBLE_PLACEMENT_POLICY = "ensemblePlacementPolicy";
     protected static final String NETWORK_TOPOLOGY_STABILIZE_PERIOD_SECONDS = "networkTopologyStabilizePeriodSeconds";
+    protected static final String READ_REORDER_THRESHOLD_PENDING_REQUESTS = "readReorderThresholdPendingRequests";
     protected static final String ENSEMBLE_PLACEMENT_POLICY_ORDER_SLOW_BOOKIES =
         "ensemblePlacementPolicyOrderSlowBookies";
 
@@ -1137,6 +1138,15 @@ public class ClientConfiguration extends AbstractConfiguration<ClientConfigurati
      */
     public int getNetworkTopologyStabilizePeriodSeconds() {
         return getInt(NETWORK_TOPOLOGY_STABILIZE_PERIOD_SECONDS, 0);
+    }
+
+    /**
+     * Get the threshold for the number of pending requests beyond which to reorder reads.
+     * If zero, this feature is turned off.
+     * @return the threshold for the number of pending requests beyond which to reorder reads.
+     */
+    public int getReorderThresholdPendingRequests() {
+        return getInt(READ_REORDER_THRESHOLD_PENDING_REQUESTS, 0);
     }
 
     /**
