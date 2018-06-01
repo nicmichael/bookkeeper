@@ -31,6 +31,7 @@ import io.netty.util.HashedWheelTimer;
 import java.net.InetAddress;
 import java.net.UnknownHostException;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -39,8 +40,10 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 import java.util.function.Supplier;
 
@@ -203,6 +206,7 @@ public class RackawareEnsemblePlacementPolicyImpl extends TopologyAwareEnsembleP
     protected StatsLogger statsLogger = null;
     protected OpStatsLogger bookiesJoinedCounter = null;
     protected OpStatsLogger bookiesLeftCounter = null;
+    protected OpStatsLogger readReorderedCounter = null;
 
     private String defaultRack = NetworkTopology.DEFAULT_RACK;
 
@@ -240,6 +244,7 @@ public class RackawareEnsemblePlacementPolicyImpl extends TopologyAwareEnsembleP
         this.statsLogger = statsLogger;
         this.bookiesJoinedCounter = statsLogger.getOpStatsLogger(BookKeeperServerStats.BOOKIES_JOINED);
         this.bookiesLeftCounter = statsLogger.getOpStatsLogger(BookKeeperServerStats.BOOKIES_LEFT);
+        this.readReorderedCounter = statsLogger.getOpStatsLogger(BookKeeperServerStats.READ_REQUESTS_REORDERED);
         this.reorderReadsRandom = reorderReadsRandom;
         this.stabilizePeriodSeconds = stabilizePeriodSeconds;
         this.reorderThresholdPendingRequests = reorderThresholdPendingRequests;
@@ -911,6 +916,50 @@ public class RackawareEnsemblePlacementPolicyImpl extends TopologyAwareEnsembleP
             ensemble, writeSet, writeSetWithRegion, bookiesHealthInfo, false, "", writeSet.size());
     }
 
+    private static ConcurrentHashMap<String, AtomicLong> reorderStats = new ConcurrentHashMap<String, AtomicLong>();
+    static {
+        new ReorderStatsThread().start();
+    }
+
+    private void updateReorderStatsCounter(String counter, long value) {
+        AtomicLong c = reorderStats.get(counter);
+        if (c == null) {
+            c = new AtomicLong(0);
+            reorderStats.put(counter, c);
+        }
+        c.addAndGet(value);
+    }
+
+    private void updateReorderStats(ArrayList<BookieSocketAddress> ensemble,
+            long[] pendingReqs, DistributionSchedule.WriteSet writeSet, boolean reordered) {
+        for (int i = 0; i < ensemble.size(); i++) {
+            updateReorderStatsCounter(ensemble.get(i).toString() + "-pending", pendingReqs[i]);
+        }
+        updateReorderStatsCounter(ensemble.get(writeSet.get(0)).toString() + "-first", 1);
+        updateReorderStatsCounter(reordered ? "read-reordered" : "read-inorder", 1);
+    }
+
+    static class ReorderStatsThread extends Thread {
+        public void run() {
+            while (true) {
+                try {
+                    String[] keys = reorderStats.keySet().toArray(new String[0]);
+                    if (keys.length > 0) {
+                        Arrays.sort(keys);
+                        StringBuilder s = new StringBuilder();
+                        for (String key : keys) {
+                            s.append((s.length() > 0 ? "; " : "" + key + "=" + reorderStats.get(key).getAndSet(0)));
+                        }
+                        LOG.info("READ_REORDER_STATS " + s);
+                    }
+                    Thread.sleep(1000);
+                } catch (Exception e) {
+                    // ignore
+                }
+            }
+        }
+    }
+
     /**
      * This function orders the read sequence with a given region. For region-unaware policies (e.g.
      * RackAware), we pass in false for regionAware and an empty myRegion. When this happens, any
@@ -982,18 +1031,24 @@ public class RackawareEnsemblePlacementPolicyImpl extends TopologyAwareEnsembleP
         }
 
         if (!isAnyBookieUnavailable) {
+            boolean reordered = false;
             if (reorderThresholdPendingRequests > 0 && writeSet.get(0) != bestBookieIdx
                     && pendingReqs[writeSet.get(0)] >= pendingReqs[bestBookieIdx] + reorderThresholdPendingRequests) {
                 for (int i = 1; i < writeSet.size(); i++) {
                     if (writeSet.get(i) == bestBookieIdx) {
-                        LOG.info("NICK read set reordered from %s (%d pending) to %s (%d pending)",
-                                ensemble.get(writeSet.get(0)), pendingReqs[writeSet.get(0)],
-                                ensemble.get(bestBookieIdx), pendingReqs[bestBookieIdx]);
+                        if (LOG.isDebugEnabled()) {
+                            LOG.debug("read set reordered from {} ({} pending) to {} ({} pending)",
+                                    ensemble.get(writeSet.get(0)), pendingReqs[writeSet.get(0)],
+                                    ensemble.get(bestBookieIdx), pendingReqs[bestBookieIdx]);
+                        }
                         writeSet.moveAndShift(i, 0);
+                        readReorderedCounter.registerSuccessfulValue(1);
+                        reordered = true;
                         break;
                     }
                 }
             }
+            updateReorderStats(ensemble, pendingReqs, writeSet, reordered);
             return writeSet;
         }
 
